@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 # ---------- Settings you can change ----------
 QUESTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "questions.json")
-NUM_QUESTIONS = 5       # questions per exam; use None to ask all of them
+NUM_QUESTIONS = None    # questions per exam; use None to ask all of them
 SHUFFLE_QUESTIONS = True
 PASS_PERCENT = 50       # pass mark in percent
 SHOW_ANSWERS = False    # False = students never see right/wrong or the correct answer; True = show after each question
@@ -57,7 +57,7 @@ TXT_WRONG = "❌ ስህተት። ትክክለኛው መልስ"
 TXT_YOUR_ANSWER = "የእርስዎ መልስ"
 TXT_RESULT = "📊 ውጤት"
 TXT_PASSED = "🎉 አልፈዋል!"
-TXT_FAILED = "💪 አልተሳካም፣ እንደገና ይሞክሩ።"
+TXT_FAILED = "አልተሳካም።"
 TXT_RECORDED = "✔️ መልስዎ ተመዝግቧል"
 TXT_ADMIN_TITLE = "📝 አዲስ የፈተና ውጤት"
 
@@ -142,11 +142,9 @@ async def notify_admin(context, user, score, total, percent):
 async def finish_exam(chat_id, user, context, score, total):
     percent = round(score * 100 / total)
     verdict = TXT_PASSED if percent >= PASS_PERCENT else TXT_FAILED
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton(TXT_RETRY_BTN, callback_data="begin")]])
     await context.bot.send_message(
         chat_id,
         f"{TXT_RESULT}: {score}/{total} ({percent}%)\n\n{verdict}",
-        reply_markup=markup,
     )
     await notify_admin(context, user, score, total, percent)
 
