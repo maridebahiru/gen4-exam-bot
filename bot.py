@@ -107,6 +107,8 @@ def validate_questions():
         raise SystemExit(f"Cannot read questions.json: {e}")
     if not isinstance(questions, list) or not questions:
         raise SystemExit("questions.json must be a non-empty list of questions.")
+    if len(questions) > 40:
+        logger.warning("More than 40 questions: button data may exceed Telegram's 64-byte limit.")
     seen = set()
     for n, q in enumerate(questions, 1):
         ok = (
@@ -187,6 +189,7 @@ def new_session(user, chat_id):
         "deadline": start + TIME_LIMIT_MINUTES * 60,
         "answered": 0,
         "score": 0,
+        "answers": [],
         "msg_id": None,
         "status": "active",
         "reason": None,
@@ -194,11 +197,19 @@ def new_session(user, chat_id):
     }
 
 
-def rebuild_session(user, message, sid, start, answered, score):
+def rebuild_session(user, message, sid, start, answered, answers):
     """The server forgot this exam (restart / sleep). Rebuild it from the button's data."""
-    total = len(make_order(sid))
-    if not (0 <= answered < total and 0 <= score <= answered and 0 < start <= now()):
+    order = make_order(sid)
+    total = len(order)
+    if not (0 <= answered < total and len(answers) == answered and 0 < start <= now()):
         return None
+    questions = get_questions()
+    score = 0
+    for k, c in enumerate(answers):
+        q = questions[order[k]]
+        if not (0 <= c < len(q["options"])):
+            return None
+        score += c == q["answer"]
     return {
         "user_id": user.id,
         "chat_id": message.chat_id,
@@ -209,6 +220,7 @@ def rebuild_session(user, message, sid, start, answered, score):
         "deadline": start + TIME_LIMIT_MINUTES * 60,
         "answered": answered,
         "score": score,
+        "answers": list(answers),
         "msg_id": message.message_id,
         "status": "active",
         "reason": None,
@@ -242,6 +254,22 @@ def result_line(s):
     return f"{TXT_RESULT}: {s['score']}/{total} ({percent}%)", percent
 
 
+def choices_report(s):
+    """One line per question, in questions.json order: '<question number>,<letter chosen>'.
+    The student's shuffled order is mapped back to the original numbers so you can mark
+    straight from questions.json."""
+    order = make_order(s["sid"])
+    given = {}
+    for k, c in enumerate(s.get("answers", [])):
+        if k < len(order):
+            given[order[k]] = c
+    lines = []
+    for idx in sorted(order):
+        c = given.get(idx)
+        lines.append(f"{idx + 1},{LETTERS[c].lower() if c is not None else '-'}")
+    return "\n".join(lines)
+
+
 # ---------- Messages ----------
 def welcome_text():
     total = len(make_order(0))
@@ -260,12 +288,13 @@ def welcome_text():
 
 
 def question_markup(s, i, q):
-    # callback_data: a:<exam id>:<start time>:<question number>:<choice>:<score so far>
+    # callback_data: a:<exam id>:<start time>:<question number>:<choice>:<choices so far>
+    so_far = "".join(str(c) for c in s.get("answers", [])) or "-"
     rows = [
         [
             InlineKeyboardButton(
                 f"{LETTERS[c]}. {opt}",
-                callback_data=f"a:{s['sid']}:{s['start']}:{i}:{c}:{s['score']}",
+                callback_data=f"a:{s['sid']}:{s['start']}:{i}:{c}:{so_far}",
             )
         ]
         for c, opt in enumerate(q["options"])
@@ -307,7 +336,7 @@ async def delete_open_question(bot, s):
             pass
 
 
-async def notify_admin(bot, s, result, percent):
+async def notify_admin(bot, s, result, percent):  # result/percent kept for the log only
     total = total_of(s)
     when = datetime.fromtimestamp(s["finished_at"], ADDIS_TZ).strftime("%Y-%m-%d %H:%M")
     used = max(0, (s["finished_at"] - s["start"]) // 60)
@@ -325,11 +354,11 @@ async def notify_admin(bot, s, result, percent):
         f"👤 {s['name']}\n"
         f"🔗 {username}\n"
         f"🆔 {s['user_id']}\n"
-        f"{result}\n"
         f"{TXT_ANSWERED}: {s['answered']}/{total}\n"
         f"⏱ {used} ደቂቃ\n"
         f"{reason}\n"
-        f"🕒 {when}"
+        f"🕒 {when}\n\n"
+        f"{choices_report(s)}"
     )
     try:
         await bot.send_message(admin, text)
@@ -352,11 +381,10 @@ async def announce_finish(bot, s):
         except Exception:
             logger.info("Could not close the open question of %s", s["user_id"])
     headline = TXT_TIME_UP if s["reason"] == "time" else TXT_FINISHED
-    verdict = TXT_PASSED if percent >= PASS_PERCENT else TXT_FAILED
     try:
         await bot.send_message(
             s["chat_id"],
-            f"{headline}\n\n{result}\n{TXT_ANSWERED}: {s['answered']}/{total}\n\n{verdict}",
+            f"{headline}\n\n{TXT_ANSWERED}: {s['answered']}/{total}",
         )
     except Exception:
         logger.exception("Could not send the result to student %s", s["user_id"])
@@ -416,8 +444,7 @@ async def enter(context, user, chat_id, create):
         return
 
     if s and s["status"] == "finished" and not ALLOW_RETAKE:
-        result, _ = result_line(s)
-        await bot.send_message(chat_id, f"{TXT_ALREADY_DONE}\n\n{result}")
+        await bot.send_message(chat_id, TXT_ALREADY_DONE)
         return
 
     if not create:
@@ -454,15 +481,16 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
     try:
-        _, sid, start, i, choice, score = query.data.split(":")
-        sid, start, i, choice, score = int(sid), int(start), int(i), int(choice), int(score)
+        _, sid, start, i, choice, so_far = query.data.split(":")
+        sid, start, i, choice = int(sid), int(start), int(i), int(choice)
+        answers = [] if so_far == "-" else [int(ch) for ch in so_far]
     except ValueError:
         await safe_answer(query)
         return
 
     s = STATE["sessions"].get(str(user.id))
     if s is None:
-        s = rebuild_session(user, query.message, sid, start, i, score)
+        s = rebuild_session(user, query.message, sid, start, i, answers)
         if s is None:
             await safe_answer(query)
             return
@@ -500,6 +528,7 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     correct = choice == q["answer"]
     if correct:
         s["score"] += 1
+    s.setdefault("answers", []).append(choice)
     s["answered"] += 1
     last = s["answered"] >= total
     if last:
