@@ -53,11 +53,12 @@ STATE_FILE = os.environ.get("STATE_FILE", os.path.join(BASE_DIR, "state.json"))
 NUM_QUESTIONS = None     # questions per exam; None = ask all of them
 SHUFFLE_QUESTIONS = True
 PASS_PERCENT = 50        # pass mark in percent
-TIME_LIMIT_MINUTES = 60  # whole exam must be finished within this time
-PER_QUESTION_SECONDS = 120  # no answer within this time = student left; exam closes, answered ones are kept (0 = off)
+TIME_LIMIT_MINUTES = 30  # whole exam must be finished within this time
+PER_QUESTION_SECONDS = 60  # no answer within this time = student left; exam closes, answered ones are kept (0 = off)
 ALLOW_RETAKE = False     # False = each student can take the exam only once
 PROTECT_CONTENT = True   # True = questions cannot be forwarded or saved
 SHOW_ANSWERS = False     # False = students never see right/wrong or the correct answer
+ID_PREFIX = "EJAT-"  # every student ID must start with this
 ADDIS_TZ = timezone(timedelta(hours=3))  # Ethiopia time, used in result messages
 
 # ---------- Texts (edit freely) ----------
@@ -79,8 +80,8 @@ TXT_ALREADY_DONE = "ፈተናውን አስቀድመው ጨርሰዋል፤ ደግ
 TXT_STALE = "ይህ ጥያቄ አስቀድሞ ተመልሷል።"
 TXT_RESUME = "▶️ ፈተናዎ ቀጥሏል። ያልተመለሰው ጥያቄ ከታች ነው።"
 TXT_ADMIN_TITLE = "📝 አዲስ የፈተና ውጤት"
-TXT_ASK_ID = "🎓 እባክዎ የተማሪ መለያ ቁጥርዎን (ID) ይጻፉና ይላኩ። ለምሳሌ፡ ሱ/ጉ/ድ 12። ከላኩ በኋላ ፈተናው ይጀምራል።"
-TXT_ID_BAD = "⚠️ መለያ ቁጥሩ ትክክል አይደለም። እባክዎ እንደገና ይጻፉ።"
+TXT_ASK_ID = "🎓 እባክዎ የተማሪ መለያ ቁጥርዎን (ID) ይጻፉና ይላኩ። መለያ ቁጥሩ በ EJAT- ይጀምራል (ለምሳሌ፡ EJAT-001/2/...)። ከላኩ በኋላ ፈተናው ይጀምራል።"
+TXT_ID_BAD = "⚠️ መለያ ቁጥሩ ትክክል አይደለም። በ EJAT- ይጀምራል (ለምሳሌ፡ EJAT-001/2/...)። እባክዎ እንደገና ይጻፉ።"
 TXT_ID_TAKEN = "⚠️ ይህ መለያ ቁጥር ቀድሞ ጥቅም ላይ ውሏል። ትክክለኛውን ቁጥርዎን ይጻፉ።"
 TXT_NEED_START = "ፈተና ለመጀመር /start ይጫኑ።"
 TXT_LEFT = "⛔ ለረጅም ጊዜ ምላሽ አልሰጡም። የመለሷቸው ጥያቄዎች ገብተዋል፤ ፈተናው ተጠናቀቀ።"
@@ -303,6 +304,7 @@ def welcome_text():
         "• ሰዓቱ ሲያልቅ የመለሷቸው ጥያቄዎች በራስ-ሰር ገብተው ፈተናው ይጠናቀቃል\n"
         f"• አንድን ጥያቄ ለ{PER_QUESTION_SECONDS // 60 if PER_QUESTION_SECONDS % 60 == 0 else PER_QUESTION_SECONDS} "
         f"{'ደቂቃ' if PER_QUESTION_SECONDS % 60 == 0 else 'ሰከንድ'} ካልመለሱ (ከቦቱ ከወጡ) ፈተናው ይዘጋል\n"
+        "• ከፈተናው ወጥተው ተመልሰው /start ከጫኑ ፈተናው ይዘጋል\n"
         "• ጥያቄዎችን ፎቶ ማንሳት ወይም ማስተላለፍ አይፈቀድም\n\n"
         "ለመጀመር ከታች ያለውን ቁልፍ ይጫኑ። ከተጫኑ በኋላ ሰዓቱ ይጀምራል።"
     )
@@ -336,7 +338,8 @@ async def send_question(bot, s):
     order = make_order(s["sid"])
     q = get_questions()[order[i]]
     text = (
-        f"{TXT_QUESTION} {i + 1}/{len(order)}   {TXT_TIME_LEFT.format(m=minutes_left(s))}\n\n"
+        f"{TXT_QUESTION} {i + 1}/{len(order)}   {TXT_TIME_LEFT.format(m=minutes_left(s))}\n"
+        f"🎓 {s.get('student_id', '?')} | {s['name']}\n\n"
         f"{q['question']}"
     )
     msg = await bot.send_message(
@@ -494,16 +497,9 @@ async def enter(context, user, chat_id, create):
             if finish_session(s, "time"):
                 await announce_finish(bot, s)
             return
-        if is_idle(s):
-            if finish_session(s, "left"):
-                await announce_finish(bot, s)
-            return
-        # Resume instead of starting a second exam. The old copy of the question is removed
-        # so there is only one open question in the chat.
-        s["chat_id"] = chat_id
-        await bot.send_message(chat_id, TXT_RESUME)
-        await delete_open_question(bot, s)
-        await send_question(bot, s)
+        # Leaving the exam and coming back with /start ends it: no resuming.
+        if finish_session(s, "left"):
+            await announce_finish(bot, s)
         return
 
     if s and s["status"] == "finished" and not ALLOW_RETAKE:
@@ -540,7 +536,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(TXT_NEED_START)
         return
     student_id = " ".join((update.message.text or "").split()).upper()
-    if not (2 <= len(student_id) <= 30):
+    if not (student_id.startswith(ID_PREFIX) and 8 <= len(student_id) <= 30):
         await update.message.reply_text(TXT_ID_BAD)
         return
     for other in STATE["sessions"].values():
