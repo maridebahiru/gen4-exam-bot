@@ -54,7 +54,8 @@ NUM_QUESTIONS = None     # questions per exam; None = ask all of them
 SHUFFLE_QUESTIONS = True
 PASS_PERCENT = 50        # pass mark in percent
 TIME_LIMIT_MINUTES = 30  # whole exam must be finished within this time
-PER_QUESTION_SECONDS = 180  # no answer within this time = student left; exam closes, answered ones are kept (0 = off)
+PER_QUESTION_SECONDS = 60  # no answer within this time = student left; exam closes, answered ones are kept (0 = off)
+MAX_SKIPS_IN_ROW = 3     # this many unanswered questions in a row = student left, exam closes
 ALLOW_RETAKE = False     # False = each student can take the exam only once
 PROTECT_CONTENT = True   # True = questions cannot be forwarded or saved
 SHOW_ANSWERS = False     # False = students never see right/wrong or the correct answer
@@ -221,7 +222,7 @@ def rebuild_session(user, message, sid, start, answered, answers):
     score = 0
     for k, c in enumerate(answers):
         q = questions[order[k]]
-        if not (0 <= c < len(q["options"])):
+        if not (-1 <= c < len(q["options"])):
             return None
         score += c == q["answer"]
     return {
@@ -282,7 +283,7 @@ def choices_report(s):
     lines = []
     for idx in sorted(order):
         c = given.get(idx)
-        if c is None:
+        if c is None or c < 0:
             lines.append(f"{idx + 1},-")
         else:
             mark = "✓" if c == questions[idx]["answer"] else "✗"
@@ -301,8 +302,8 @@ def welcome_text():
         f"• የጥያቄዎች ብዛት፡ {total}\n"
         f"• የተሰጠ ሰዓት፡ {TIME_LIMIT_MINUTES} ደቂቃ\n"
         f"{once}"
-        f"• አንድን ጥያቄ ለ{PER_QUESTION_SECONDS // 60 if PER_QUESTION_SECONDS % 60 == 0 else PER_QUESTION_SECONDS} "
-        f"{'ደቂቃ' if PER_QUESTION_SECONDS % 60 == 0 else 'ሰከንድ'} ካልመለሱ (ከቦቱ ከወጡ) ፈተናው ይዘጋል\n"
+        f"• ለእያንዳንዱ ጥያቄ {PER_QUESTION_SECONDS // 60 if PER_QUESTION_SECONDS % 60 == 0 else PER_QUESTION_SECONDS} "
+        f"{'ደቂቃ' if PER_QUESTION_SECONDS % 60 == 0 else 'ሰከንድ'} ተሰጥቷል፤ ሰዓቱ ካለፈ ጥያቄው ይዘለላል\n"
         "• ከፈተናው ወጥተው ተመልሰው /start ከጫኑ ፈተናው ይዘጋል\n"
         "• ጥያቄዎችን ፎቶ ማንሳት ወይም ማስተላለፍ አይፈቀድም\n\n"
         "ለመጀመር ከታች ያለውን ቁልፍ ይጫኑ። ከተጫኑ በኋላ ሰዓቱ ይጀምራል።"
@@ -311,7 +312,7 @@ def welcome_text():
 
 def question_markup(s, i, q):
     # callback_data: a:<exam id>:<start time>:<question number>:<choice>:<choices so far>
-    so_far = "".join(str(c) for c in s.get("answers", [])) or "-"
+    so_far = "".join(str(c) if c >= 0 else "x" for c in s.get("answers", [])) or "-"
     rows = [
         [
             InlineKeyboardButton(
@@ -452,12 +453,40 @@ def is_idle(s):
     return bool(PER_QUESTION_SECONDS) and now() - s.get("q_sent", now()) > PER_QUESTION_SECONDS
 
 
+async def skip_question(bot, s):
+    """The question's time is over: count it as unanswered and move on (or close if the student is gone)."""
+    total = total_of(s)
+    i = s["answered"]
+    s.setdefault("answers", []).append(-1)
+    s["answered"] += 1
+    save_state()
+    try:
+        if s.get("msg_id"):
+            await bot.edit_message_text(
+                f"{TXT_QUESTION} {i + 1}/{total}\n\n{TXT_TIME_UP_SHORT}", chat_id=s["chat_id"], message_id=s["msg_id"]
+            )
+    except Exception:
+        pass
+    row = 0
+    for c in reversed(s["answers"]):
+        if c != -1:
+            break
+        row += 1
+    if s["answered"] >= total:
+        if finish_session(s, "done"):
+            await announce_finish(bot, s)
+    elif row >= MAX_SKIPS_IN_ROW:
+        if finish_session(s, "left"):
+            await announce_finish(bot, s)
+    else:
+        await send_question(bot, s)
+
+
 async def job_idle(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
     s = STATE["sessions"].get(str(data["uid"]))
     if s and s["sid"] == data["sid"] and s["status"] == "active" and s["answered"] == data["i"]:
-        if finish_session(s, "left"):
-            await announce_finish(context.bot, s)
+        await skip_question(context.bot, s)
 
 
 async def job_timeout(context: ContextTypes.DEFAULT_TYPE):
@@ -478,8 +507,7 @@ async def post_init(app: Application):
             if finish_session(s, "time"):
                 await announce_finish(app.bot, s)
         elif is_idle(s):
-            if finish_session(s, "left"):
-                await announce_finish(app.bot, s)
+            await skip_question(app.bot, s)
         else:
             schedule_timeout(app.job_queue, s)
             schedule_idle(s, s["q_sent"] + PER_QUESTION_SECONDS - now() + 1)
@@ -570,7 +598,7 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         _, sid, start, i, choice, so_far = query.data.split(":")
         sid, start, i, choice = int(sid), int(start), int(i), int(choice)
-        answers = [] if so_far == "-" else [int(ch) for ch in so_far]
+        answers = [] if so_far == "-" else [-1 if ch == "x" else int(ch) for ch in so_far]
     except ValueError:
         await safe_answer(query)
         return
@@ -604,11 +632,10 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_answer(query, TXT_STALE)
         return
 
-    # The student was away too long on this question: close the exam, keep what was answered.
+    # This question's time was already over (late tap): it is skipped and not counted.
     if is_idle(s):
         await safe_answer(query)
-        if finish_session(s, "left"):
-            await announce_finish(context.bot, s)
+        await skip_question(context.bot, s)
         return
 
     order = make_order(s["sid"])

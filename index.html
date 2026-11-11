@@ -11,10 +11,13 @@ input{width:100%;box-sizing:border-box;padding:12px;font-size:16px;border-radius
 .t{display:flex;justify-content:space-between;opacity:.8;font-size:14px}
 </style></head><body><div id="wm"></div><div id="w"></div>
 <script>
-const tg=Telegram.WebApp,W=document.getElementById("w");tg.ready();tg.expand();
+const tg=(window.Telegram&&Telegram.WebApp)||(()=>{const p=new URLSearchParams(location.hash.slice(1)),n=()=>{};
+return{initData:p.get("tgWebAppData")||"",ready:n,expand:n,enableClosingConfirmation:n,disableVerticalSwipes:n,onEvent:n,
+close(){try{TelegramWebviewProxy.postEvent("web_app_close","")}catch(e){try{parent.postMessage(JSON.stringify({eventType:"web_app_close",eventData:{}}),"*")}catch(_){}}}}})();
+const W=document.getElementById("w");tg.ready();tg.expand();
 try{tg.enableClosingConfirmation();tg.disableVerticalSwipes()}catch(e){}
 document.addEventListener("contextmenu",e=>e.preventDefault());
-let Q=[],L=[],k=0,end=0,run=false,hb,hid;
+const QSEC=60,MAXSKIP=3;let qend=0,skips=0,Q=[],L=[],k=0,end=0,run=false,hb,hid;
 const post=(a,d)=>fetch("/api/"+a,{method:"POST",body:JSON.stringify({initData:tg.initData,...d})}).then(r=>r.json()).catch(()=>({}));
 const msg=t=>{run=false;clearInterval(hb);W.innerHTML=`<h3>${t}</h3><button class="b go" onclick="tg.close()">ዝጋ</button>`};
 function idScreen(m){W.innerHTML=`<h3>🎓 የተማሪ መለያ ቁጥር</h3><p>በ EJAT- ይጀምራል (ለምሳሌ፡ EJAT-001/2/...)</p>${m?`<p style="color:#c33">${m}</p>`:""}<input id=i placeholder="EJAT-001/2/..."><button class="b go" style="margin-top:12px" onclick="start()">🚀 ፈተና ጀምር</button>`}
@@ -25,11 +28,12 @@ async function start(){const v=document.getElementById("i").value;const r=await 
  document.getElementById("wm").textContent=(r.sid+" ").repeat(600);
  hb=setInterval(async()=>{const x=await post("ping",{});if(x.state=="closed")msg("ፈተናው ተጠናቀቀ።")},5000);show()}
 function show(){if(k>=Q.length){post("finish",{reason:"done"});return msg("✅ ፈተናውን ጨርሰዋል።")}
- const q=Q[k];W.innerHTML=`<div class=t><span>ጥያቄ ${k+1}/${Q.length}</span><span id=tm></span></div><h3>${q.q}</h3>`+
+ qend=Date.now()+QSEC*1000;const q=Q[k];W.innerHTML=`<div class=t><span>ጥያቄ ${k+1}/${Q.length}</span><span id=tm></span></div><h3>${q.q}</h3>`+
  q.o.map((o,c)=>`<button class=b onclick="ans(${c})">${L[c]}. ${o}</button>`).join("");tick()}
-async function ans(c){if(!run)return;const i=Q[k].i;k++;show();const r=await post("answer",{i,c});if(r.state=="closed")msg("ፈተናው ተጠናቀቀ።")}
-function tick(){const e=document.getElementById("tm");if(!e)return;const s=Math.max(0,Math.round((end-Date.now())/1000));e.textContent="⏱ "+Math.floor(s/60)+":"+String(s%60).padStart(2,"0");if(s<=0&&run){msg("⏰ ሰዓቱ አልቋል")}}
+async function ans(c){if(!run)return;skips=0;const i=Q[k].i;k++;show();const r=await post("answer",{i,c});if(r.state=="closed")msg("ፈተናው ተጠናቀቀ።")}
+function tick(){const e=document.getElementById("tm");if(!e)return;const s=Math.max(0,Math.round((end-Date.now())/1000));const qs=Math.max(0,Math.ceil((qend-Date.now())/1000));if(qs<=0&&run&&s>0)return skip();e.textContent="ጥያቄ ⏱ "+qs+" | ጠቅላላ "+Math.floor(s/60)+":"+String(s%60).padStart(2,"0");if(s<=0&&run){msg("⏰ ሰዓቱ አልቋል")}}
 setInterval(tick,1000);
+function skip(){if(!run)return;k++;skips++;if(skips>=MAXSKIP){post("finish",{reason:"left"});return msg("⛔ ፈተናው ተዘግቷል")}show()}
 function away(){if(!run)return;hid=setTimeout(()=>{if(run){navigator.sendBeacon("/api/finish",JSON.stringify({initData:tg.initData,reason:"left"}));msg("⛔ ፈተናው ተዘግቷል")}},6000)}
 function back(){clearTimeout(hid)}
 document.addEventListener("visibilitychange",()=>document.hidden?away():back());
