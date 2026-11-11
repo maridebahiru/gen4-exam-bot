@@ -36,6 +36,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 logging.basicConfig(
@@ -51,7 +53,8 @@ STATE_FILE = os.environ.get("STATE_FILE", os.path.join(BASE_DIR, "state.json"))
 NUM_QUESTIONS = None     # questions per exam; None = ask all of them
 SHUFFLE_QUESTIONS = True
 PASS_PERCENT = 50        # pass mark in percent
-TIME_LIMIT_MINUTES = 30  # whole exam must be finished within this time
+TIME_LIMIT_MINUTES = 60  # whole exam must be finished within this time
+PER_QUESTION_SECONDS = 120  # no answer within this time = student left; exam closes, answered ones are kept (0 = off)
 ALLOW_RETAKE = False     # False = each student can take the exam only once
 PROTECT_CONTENT = True   # True = questions cannot be forwarded or saved
 SHOW_ANSWERS = False     # False = students never see right/wrong or the correct answer
@@ -76,14 +79,22 @@ TXT_ALREADY_DONE = "ፈተናውን አስቀድመው ጨርሰዋል፤ ደግ
 TXT_STALE = "ይህ ጥያቄ አስቀድሞ ተመልሷል።"
 TXT_RESUME = "▶️ ፈተናዎ ቀጥሏል። ያልተመለሰው ጥያቄ ከታች ነው።"
 TXT_ADMIN_TITLE = "📝 አዲስ የፈተና ውጤት"
+TXT_ASK_ID = "🎓 እባክዎ የተማሪ መለያ ቁጥርዎን (ID) ይጻፉና ይላኩ። ለምሳሌ፡ ሱ/ጉ/ድ 12። ከላኩ በኋላ ፈተናው ይጀምራል።"
+TXT_ID_BAD = "⚠️ መለያ ቁጥሩ ትክክል አይደለም። እባክዎ እንደገና ይጻፉ።"
+TXT_ID_TAKEN = "⚠️ ይህ መለያ ቁጥር ቀድሞ ጥቅም ላይ ውሏል። ትክክለኛውን ቁጥርዎን ይጻፉ።"
+TXT_NEED_START = "ፈተና ለመጀመር /start ይጫኑ።"
+TXT_LEFT = "⛔ ለረጅም ጊዜ ምላሽ አልሰጡም። የመለሷቸው ጥያቄዎች ገብተዋል፤ ፈተናው ተጠናቀቀ።"
+TXT_CLOSED_LEFT = "⛔ ጥያቄው ተዘግቷል"
+TXT_REASON_LEFT = "⛔ ተማሪው ከቦቱ ወጥቷል / መልስ አልሰጠም (የተመለሱት ገብተዋል)"
 TXT_REASON_DONE = "✅ ፈተናውን ጨርሷል"
 TXT_REASON_TIME = "⏰ ሰዓት አልቋል (የተመለሱት በራስ-ሰር ገብተዋል)"
 
-LETTERS = ["A", "B", "C", "D", "E", "F"]
+LETTERS = ["ሀ", "ለ", "ሐ", "መ", "ሠ", "ረ"]  # same letters as the paper exam
 
 # user id (as text) -> exam session. Saved to STATE_FILE after every change.
 STATE = {"sessions": {}}
 _QUESTIONS = None
+JOBQ = None  # set at start-up; used for the per-question inactivity timer
 
 
 def now():
@@ -177,9 +188,11 @@ def admin_id():
 
 
 # ---------- Sessions ----------
-def new_session(user, chat_id):
+def new_session(user, chat_id, student_id="?"):
     start = int(now())
     return {
+        "student_id": student_id,
+        "q_sent": start,
         "user_id": user.id,
         "chat_id": chat_id,
         "name": user.full_name or "?",
@@ -211,6 +224,8 @@ def rebuild_session(user, message, sid, start, answered, answers):
             return None
         score += c == q["answer"]
     return {
+        "student_id": "?",
+        "q_sent": int(now()),
         "user_id": user.id,
         "chat_id": message.chat_id,
         "name": user.full_name or "?",
@@ -255,10 +270,10 @@ def result_line(s):
 
 
 def choices_report(s):
-    """One line per question, in questions.json order: '<question number>,<letter chosen>'.
-    The student's shuffled order is mapped back to the original numbers so you can mark
-    straight from questions.json."""
+    """One line per question, in questions.json order: '<question number>,<letter> ✓/✗'.
+    The student's shuffled order is mapped back to the original numbers."""
     order = make_order(s["sid"])
+    questions = get_questions()
     given = {}
     for k, c in enumerate(s.get("answers", [])):
         if k < len(order):
@@ -266,7 +281,11 @@ def choices_report(s):
     lines = []
     for idx in sorted(order):
         c = given.get(idx)
-        lines.append(f"{idx + 1},{LETTERS[c].lower() if c is not None else '-'}")
+        if c is None:
+            lines.append(f"{idx + 1},-")
+        else:
+            mark = "✓" if c == questions[idx]["answer"] else "✗"
+            lines.append(f"{idx + 1},{LETTERS[c]} {mark}")
     return "\n".join(lines)
 
 
@@ -282,6 +301,8 @@ def welcome_text():
         f"• የተሰጠ ሰዓት፡ {TIME_LIMIT_MINUTES} ደቂቃ\n"
         f"{once}"
         "• ሰዓቱ ሲያልቅ የመለሷቸው ጥያቄዎች በራስ-ሰር ገብተው ፈተናው ይጠናቀቃል\n"
+        f"• አንድን ጥያቄ ለ{PER_QUESTION_SECONDS // 60 if PER_QUESTION_SECONDS % 60 == 0 else PER_QUESTION_SECONDS} "
+        f"{'ደቂቃ' if PER_QUESTION_SECONDS % 60 == 0 else 'ሰከንድ'} ካልመለሱ (ከቦቱ ከወጡ) ፈተናው ይዘጋል\n"
         "• ጥያቄዎችን ፎቶ ማንሳት ወይም ማስተላለፍ አይፈቀድም\n\n"
         "ለመጀመር ከታች ያለውን ቁልፍ ይጫኑ። ከተጫኑ በኋላ ሰዓቱ ይጀምራል።"
     )
@@ -325,7 +346,9 @@ async def send_question(bot, s):
         protect_content=PROTECT_CONTENT,
     )
     s["msg_id"] = msg.message_id
+    s["q_sent"] = int(now())
     save_state()
+    schedule_idle(s)
 
 
 async def delete_open_question(bot, s):
@@ -341,10 +364,10 @@ async def notify_admin(bot, s, result, percent):  # result/percent kept for the 
     when = datetime.fromtimestamp(s["finished_at"], ADDIS_TZ).strftime("%Y-%m-%d %H:%M")
     used = max(0, (s["finished_at"] - s["start"]) // 60)
     username = f"@{s['username']}" if s.get("username") else "-"
-    reason = TXT_REASON_TIME if s["reason"] == "time" else TXT_REASON_DONE
+    reason = {"time": TXT_REASON_TIME, "left": TXT_REASON_LEFT}.get(s["reason"], TXT_REASON_DONE)
     logger.info(
-        "RESULT | %s | %s | %s | %s | %s/%s (%s%%) | answered %s | %s min | %s",
-        when, s["name"], username, s["user_id"], s["score"], total, percent, s["answered"], used, s["reason"],
+        "RESULT | %s | %s (ID %s) | %s | %s | %s/%s (%s%%) | answered %s | %s min | %s",
+        when, s["name"], s.get("student_id", "?"), username, s["user_id"], s["score"], total, percent, s["answered"], used, s["reason"],
     )
     admin = admin_id()
     if admin is None:
@@ -354,6 +377,8 @@ async def notify_admin(bot, s, result, percent):  # result/percent kept for the 
         f"👤 {s['name']}\n"
         f"🔗 {username}\n"
         f"🆔 {s['user_id']}\n"
+        f"🎓 ID: {s.get('student_id', '?')}\n"
+        f"{result}\n"
         f"{TXT_ANSWERED}: {s['answered']}/{total}\n"
         f"⏱ {used} ደቂቃ\n"
         f"{reason}\n"
@@ -370,17 +395,18 @@ async def announce_finish(bot, s):
     """Tell the student and the admin. Call it only when finish_session() returned True."""
     total = total_of(s)
     result, percent = result_line(s)
-    if s["reason"] == "time" and s.get("msg_id") and s["answered"] < total:
+    if s["reason"] in ("time", "left") and s.get("msg_id") and s["answered"] < total:
         # Replace the unanswered question so it cannot be copied after time is up.
         try:
             await bot.edit_message_text(
-                f"{TXT_QUESTION} {s['answered'] + 1}/{total}\n\n{TXT_TIME_UP_SHORT}",
+                f"{TXT_QUESTION} {s['answered'] + 1}/{total}\n\n"
+                f"{TXT_CLOSED_LEFT if s['reason'] == 'left' else TXT_TIME_UP_SHORT}",
                 chat_id=s["chat_id"],
                 message_id=s["msg_id"],
             )
         except Exception:
             logger.info("Could not close the open question of %s", s["user_id"])
-    headline = TXT_TIME_UP if s["reason"] == "time" else TXT_FINISHED
+    headline = {"time": TXT_TIME_UP, "left": TXT_LEFT}.get(s["reason"], TXT_FINISHED)
     try:
         await bot.send_message(
             s["chat_id"],
@@ -405,6 +431,33 @@ def schedule_timeout(job_queue, s):
     )
 
 
+def schedule_idle(s, delay=None):
+    """(Re)start the 'student left' timer for the question that is open now."""
+    if JOBQ is None or not PER_QUESTION_SECONDS:
+        return
+    name = f"idle-{s['user_id']}"
+    for j in JOBQ.get_jobs_by_name(name):
+        j.schedule_removal()
+    JOBQ.run_once(
+        job_idle,
+        max(1, delay if delay is not None else PER_QUESTION_SECONDS + 1),
+        data={"uid": s["user_id"], "sid": s["sid"], "i": s["answered"]},
+        name=name,
+    )
+
+
+def is_idle(s):
+    return bool(PER_QUESTION_SECONDS) and now() - s.get("q_sent", now()) > PER_QUESTION_SECONDS
+
+
+async def job_idle(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    s = STATE["sessions"].get(str(data["uid"]))
+    if s and s["sid"] == data["sid"] and s["status"] == "active" and s["answered"] == data["i"]:
+        if finish_session(s, "left"):
+            await announce_finish(context.bot, s)
+
+
 async def job_timeout(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
     s = STATE["sessions"].get(str(data["uid"]))
@@ -414,14 +467,20 @@ async def job_timeout(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app: Application):
     """Runs once at start-up: close exams whose time ran out while the bot was off, re-arm the others."""
+    global JOBQ
+    JOBQ = app.job_queue
     for s in list(STATE["sessions"].values()):
         if s["status"] != "active":
             continue
         if now() >= s["deadline"]:
             if finish_session(s, "time"):
                 await announce_finish(app.bot, s)
+        elif is_idle(s):
+            if finish_session(s, "left"):
+                await announce_finish(app.bot, s)
         else:
             schedule_timeout(app.job_queue, s)
+            schedule_idle(s, s["q_sent"] + PER_QUESTION_SECONDS - now() + 1)
 
 
 # ---------- Handlers ----------
@@ -433,6 +492,10 @@ async def enter(context, user, chat_id, create):
     if s and s["status"] == "active":
         if now() >= s["deadline"]:
             if finish_session(s, "time"):
+                await announce_finish(bot, s)
+            return
+        if is_idle(s):
+            if finish_session(s, "left"):
                 await announce_finish(bot, s)
             return
         # Resume instead of starting a second exam. The old copy of the question is removed
@@ -452,11 +515,40 @@ async def enter(context, user, chat_id, create):
         await bot.send_message(chat_id, welcome_text(), reply_markup=markup)
         return
 
-    s = new_session(user, chat_id)
+    # Ask for the student ID first; the exam (and its timer) starts when the ID arrives.
+    context.user_data["awaiting_id"] = True
+    await bot.send_message(chat_id, TXT_ASK_ID)
+
+
+async def start_exam(context, user, chat_id, student_id):
+    s = new_session(user, chat_id, student_id)
     STATE["sessions"][str(user.id)] = s
     save_state()
     schedule_timeout(context.job_queue, s)
-    await send_question(bot, s)
+    await send_question(context.bot, s)
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    if chat is None or chat.type != "private" or update.message is None:
+        return
+    s = STATE["sessions"].get(str(user.id))
+    if s and (s["status"] == "active" or not ALLOW_RETAKE):
+        return  # exam in progress or already done: ignore chatter
+    if not context.user_data.get("awaiting_id"):
+        await update.message.reply_text(TXT_NEED_START)
+        return
+    student_id = " ".join((update.message.text or "").split()).upper()
+    if not (2 <= len(student_id) <= 30):
+        await update.message.reply_text(TXT_ID_BAD)
+        return
+    for other in STATE["sessions"].values():
+        if other.get("student_id") == student_id and other["user_id"] != user.id:
+            await update.message.reply_text(TXT_ID_TAKEN)
+            return
+    context.user_data.pop("awaiting_id", None)
+    await start_exam(context, user, chat.id, student_id)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -517,6 +609,13 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_answer(query, TXT_STALE)
         return
 
+    # The student was away too long on this question: close the exam, keep what was answered.
+    if is_idle(s):
+        await safe_answer(query)
+        if finish_session(s, "left"):
+            await announce_finish(context.bot, s)
+        return
+
     order = make_order(s["sid"])
     total = len(order)
     q = get_questions()[order[i]]
@@ -575,6 +674,7 @@ def main():
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CallbackQueryHandler(on_begin, pattern=r"^begin$"))
     app.add_handler(CallbackQueryHandler(on_answer, pattern=r"^a:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 
     base_url = os.environ.get("WEBHOOK_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
