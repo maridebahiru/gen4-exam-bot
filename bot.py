@@ -303,7 +303,7 @@ def welcome_text():
         f"• የተሰጠ ሰዓት፡ {TIME_LIMIT_MINUTES} ደቂቃ\n"
         f"{once}"
         f"• ለእያንዳንዱ ጥያቄ {PER_QUESTION_SECONDS // 60 if PER_QUESTION_SECONDS % 60 == 0 else PER_QUESTION_SECONDS} "
-        f"{'ደቂቃ' if PER_QUESTION_SECONDS % 60 == 0 else 'ሰከንድ'} ተሰጥቷል፤ ሰዓቱ ካለፈ ጥያቄው ይዘለላል\n"
+        f"{'ደቂቃ' if PER_QUESTION_SECONDS % 60 == 0 else 'ሰከንድ'} ተሰጥቷል\n"
         "• ከፈተናው ወጥተው ተመልሰው /start ከጫኑ ፈተናው ይዘጋል\n"
         "• ጥያቄዎችን ፎቶ ማንሳት ወይም ማስተላለፍ አይፈቀድም\n\n"
         "ለመጀመር ከታች ያለውን ቁልፍ ይጫኑ። ከተጫኑ በኋላ ሰዓቱ ይጀምራል።"
