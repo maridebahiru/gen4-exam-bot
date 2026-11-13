@@ -2,13 +2,27 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-body{margin:0;font-family:system-ui,sans-serif;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#111);-webkit-user-select:none;user-select:none}
+:root{--m:#65081b;--g:#d3a200;--bg:#fffaf0;--tx:#2b1216}
+*{-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx);-webkit-user-select:none;user-select:none}
 #w{padding:16px;max-width:640px;margin:auto;position:relative;z-index:1}
-.b{display:flex;gap:8px;align-items:flex-start;width:100%;text-align:left;white-space:normal;overflow-wrap:anywhere;word-break:break-word;line-height:1.45;height:auto;margin:8px 0;padding:14px;border:1px solid #8884;border-radius:10px;background:var(--tg-theme-secondary-bg-color,#f2f2f2);color:inherit;font-size:16px}
-.go{justify-content:center;background:var(--tg-theme-button-color,#2481cc);color:var(--tg-theme-button-text-color,#fff);text-align:center}
-input{width:100%;box-sizing:border-box;padding:12px;font-size:16px;border-radius:10px;border:1px solid #8886}
-#wm{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:.07;font-size:18px;line-height:46px;overflow:hidden;transform:rotate(-20deg) scale(1.6);word-break:break-all}
-.t{display:flex;justify-content:space-between;opacity:.8;font-size:14px}
+h3{color:var(--m)}
+.b{display:flex;gap:8px;align-items:flex-start;width:100%;text-align:left;white-space:normal;overflow-wrap:anywhere;word-break:break-word;line-height:1.45;height:auto;margin:8px 0;padding:14px;border:1.5px solid #65081b33;border-radius:10px;background:#fff;color:inherit;font-size:16px;cursor:pointer}
+.b .lt{flex:none;font-weight:700;color:var(--m)}
+.b.sel{background:var(--m);color:#fff;border-color:var(--g)}
+.b.sel .lt{color:var(--g)}
+.go{justify-content:center;background:var(--m);color:#fff;border:2px solid var(--g);text-align:center;font-weight:700}
+.alt{justify-content:center;background:#fff;color:var(--m);border:2px solid var(--g);text-align:center;font-weight:700}
+.nav{display:flex;gap:8px;margin-top:8px}
+.nav .b{margin:0;flex:1}
+input{width:100%;box-sizing:border-box;padding:12px;font-size:16px;border-radius:10px;border:1.5px solid var(--m);background:#fff;color:var(--tx)}
+input:focus{outline:2px solid var(--g)}
+#wm{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:.07;color:var(--m);font-size:18px;line-height:46px;overflow:hidden;transform:rotate(-20deg) scale(1.6);word-break:break-all}
+.t{display:flex;justify-content:space-between;align-items:center;background:var(--m);color:var(--g);font-size:14px;font-weight:600;padding:10px 14px;border-radius:10px;border-bottom:3px solid var(--g);margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:12px 0}
+.n{padding:14px 0;border-radius:10px;border:2px solid var(--g);background:#fff;color:var(--m);font-size:16px;font-weight:700;cursor:pointer}
+.n.done{background:var(--m);color:#fff;border-color:var(--m)}
+.warn{color:var(--m);font-weight:600}
 </style></head><body><div id="wm"></div><div id="w"></div>
 <script>
 const tg=(window.Telegram&&Telegram.WebApp)||(()=>{const p=new URLSearchParams(location.hash.slice(1)),n=()=>{};
@@ -16,25 +30,49 @@ return{initData:p.get("tgWebAppData")||"",ready:n,expand:n,enableClosingConfirma
 close(){try{TelegramWebviewProxy.postEvent("web_app_close","")}catch(e){try{parent.postMessage(JSON.stringify({eventType:"web_app_close",eventData:{}}),"*")}catch(_){}}}}})();
 const W=document.getElementById("w");tg.ready();tg.expand();
 try{tg.enableClosingConfirmation();tg.disableVerticalSwipes()}catch(e){}
+try{tg.setHeaderColor("#65081b");tg.setBackgroundColor("#fffaf0")}catch(e){}
 document.addEventListener("contextmenu",e=>e.preventDefault());
-const QSEC=60,MAXSKIP=3;let qend=0,skips=0,Q=[],L=[],k=0,end=0,run=false,hb,hid;
+let Q=[],L=[],A={},k=0,end=0,run=false,hb,hid,view="q";
 const post=(a,d)=>fetch("/api/"+a,{method:"POST",body:JSON.stringify({initData:tg.initData,...d})}).then(r=>r.json()).catch(()=>({}));
 const msg=t=>{run=false;clearInterval(hb);W.innerHTML=`<h3>${t}</h3><button class="b go" onclick="tg.close()">ዝጋ</button>`};
 function idScreen(m){W.innerHTML=`<h3>🎓 የተማሪ መለያ ቁጥር</h3><p>በ EJAT- ይጀምራል (ለምሳሌ፡ EJAT-001/2/...)</p>${m?`<p style="color:#c33">${m}</p>`:""}<input id=i placeholder="EJAT-001/2/..."><button class="b go" style="margin-top:12px" onclick="start()">🚀 ፈተና ጀምር</button>`}
 async function start(){const v=document.getElementById("i").value;const r=await post("start",{student_id:v});
  if(r.state=="badid")return idScreen("መለያ ቁጥሩ ትክክል አይደለም");if(r.state=="takenid")return idScreen("ይህ መለያ ቁጥር ቀድሞ ጥቅም ላይ ውሏል");
  if(r.state!="run")return msg("ፈተናው ተዘግቷል ወይም አስቀድመው ወስደዋል።");
- Q=r.questions;L=r.letters;end=Date.now()+r.left*1000;run=true;
+ Q=r.questions;L=r.letters;A={};for(const x in (r.answers||{}))A[x]=r.answers[x];
+ end=Date.now()+r.left*1000;run=true;k=0;view="q";
  document.getElementById("wm").textContent=(r.sid+" ").repeat(600);
  hb=setInterval(async()=>{const x=await post("ping",{});if(x.state=="closed")msg("ፈተናው ተጠናቀቀ።")},10000);show()}
-function show(){if(k>=Q.length){post("finish",{reason:"done"});return msg("✅ ፈተናውን ጨርሰዋል።")}
- qend=Date.now()+QSEC*1000;const q=Q[k];W.innerHTML=`<div class=t><span>ጥያቄ ${k+1}/${Q.length}</span><span id=tm></span></div><h3 style="line-height:1.5;overflow-wrap:anywhere">${q.q}</h3>`+
- q.o.map((o,c)=>`<button class=b onclick="ans(${c})"><span style="flex:none">${L[c]}.</span><span style="flex:1;min-width:0">${o}</span></button>`).join("");tick()}
-async function ans(c){if(!run)return;skips=0;const i=Q[k].i;k++;show();const r=await post("answer",{i,c});if(r.state=="closed")msg("ፈተናው ተጠናቀቀ።")}
-function tick(){const e=document.getElementById("tm");if(!e)return;const s=Math.max(0,Math.round((end-Date.now())/1000));const qs=Math.max(0,Math.ceil((qend-Date.now())/1000));if(qs<=0&&run&&s>0)return skip();e.textContent="ጥያቄ ⏱ "+qs+" | ጠቅላላ "+Math.floor(s/60)+":"+String(s%60).padStart(2,"0");if(s<=0&&run){msg("⏰ ሰዓቱ አልቋል")}}
+function show(){
+ if(view=="review")return review();
+ if(view=="confirm")return confirmScreen();
+ const q=Q[k],last=k==Q.length-1;
+ W.innerHTML=`<div class=t><span>ጥያቄ ${k+1}/${Q.length}</span><span id=tm></span></div><h3 style="line-height:1.5;overflow-wrap:anywhere">${q.q}</h3>`+
+ q.o.map((o,c)=>`<button class="b${A[q.i]===c?" sel":""}" onclick="ans(${c})"><span class=lt>${L[c]}.</span><span style="flex:1;min-width:0">${o}</span></button>`).join("")+
+ `<div class=nav><button class="b alt" ${k==0?"disabled style='opacity:.4'":""} onclick="go(-1)">◀ ቀዳሚ</button>`+
+ (last?`<button class="b go" onclick="goReview()">📋 ክለሳ</button>`:`<button class="b go" onclick="go(1)">ቀጣይ ▶</button>`)+`</div>`+
+ `<button class="b alt" style="margin-top:12px" onclick="goReview()">📋 ሁሉንም ጥያቄዎች ተመልከት</button>`;tick()}
+function go(d){k=Math.min(Q.length-1,Math.max(0,k+d));show()}
+function jump(i){k=i;view="q";show()}
+function goReview(){view="review";show()}
+async function ans(c){if(!run)return;const i=Q[k].i;A[i]=c;show();const r=await post("answer",{i,c});if(r.state=="closed")msg("ፈተናው ተጠናቀቀ።")}
+function review(){
+ const un=Q.filter(q=>A[q.i]===undefined).length;
+ W.innerHTML=`<div class=t><span>📋 ክለሳ</span><span id=tm></span></div>`+
+ `<p>የተመለሱ፡ <b>${Q.length-un}/${Q.length}</b>${un?` · <span class=warn>ያልተመለሱ፡ ${un}</span>`:""}</p><p>ወደ ጥያቄ ለመመለስ ቁጥሩን ይጫኑ።</p>`+
+ `<div class=grid>${Q.map((q,n)=>`<button class="n${A[q.i]!==undefined?" done":""}" onclick="jump(${n})">${n+1}</button>`).join("")}</div>`+
+ `<button class="b go" onclick="view='confirm';show()">✅ ፈተናውን አስረክብ</button>`+
+ `<button class="b alt" onclick="jump(0)">◀ ወደ ጥያቄዎች ተመለስ</button>`;tick()}
+function confirmScreen(){
+ const un=Q.filter(q=>A[q.i]===undefined).length;
+ W.innerHTML=`<div class=t><span>⚠️ ማረጋገጫ</span><span id=tm></span></div><h3>ፈተናውን ማስረከብ እርግጠኛ ነዎት?</h3>`+
+ (un?`<p class=warn>${un} ያልተመለሱ ጥያቄዎች አሉ።</p>`:"")+`<p>ካስረከቡ በኋላ መልስ መቀየር አይቻልም።</p>`+
+ `<button class="b go" onclick="submitExam()">አዎ፣ አስረክብ</button><button class="b alt" onclick="view='review';show()">አይ፣ ተመለስ</button>`;tick()}
+async function submitExam(){if(!run)return;await post("finish",{reason:"done",answers:A});msg("✅ ፈተናውን ጨርሰዋል።")}
+function tick(){const e=document.getElementById("tm");if(!e)return;const s=Math.max(0,Math.round((end-Date.now())/1000));
+ e.textContent="⏱ "+Math.floor(s/60)+":"+String(s%60).padStart(2,"0");if(s<=0&&run){msg("⏰ ሰዓቱ አልቋል")}}
 setInterval(tick,1000);
-function skip(){if(!run)return;k++;skips++;if(skips>=MAXSKIP){post("finish",{reason:"left"});return msg("⛔ ፈተናው ተዘግቷል")}show()}
-function away(){if(!run)return;hid=setTimeout(()=>{if(run){navigator.sendBeacon("/api/finish",JSON.stringify({initData:tg.initData,reason:"left"}));msg("⛔ ፈተናው ተዘግቷል")}},6000)}
+function away(){if(!run)return;hid=setTimeout(()=>{if(run){navigator.sendBeacon("/api/finish",JSON.stringify({initData:tg.initData,reason:"left",answers:A}));msg("⛔ ፈተናው ተዘግቷል")}},6000)}
 function back(){clearTimeout(hid)}
 document.addEventListener("visibilitychange",()=>document.hidden?away():back());
 try{tg.onEvent("deactivated",away);tg.onEvent("activated",back)}catch(e){}
