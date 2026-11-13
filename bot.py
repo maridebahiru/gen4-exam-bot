@@ -54,7 +54,7 @@ NUM_QUESTIONS = None     # questions per exam; None = ask all of them
 SHUFFLE_QUESTIONS = True
 PASS_PERCENT = 50        # pass mark in percent
 TIME_LIMIT_MINUTES = 30  # whole exam must be finished within this time
-PER_QUESTION_SECONDS = 60  # no answer within this time = student left; exam closes, answered ones are kept (0 = off)
+PER_QUESTION_SECONDS = 0  # no answer within this time = student left; exam closes, answered ones are kept (0 = off)
 MAX_SKIPS_IN_ROW = 3     # this many unanswered questions in a row = student left, exam closes
 ALLOW_RETAKE = False     # False = each student can take the exam only once
 PROTECT_CONTENT = True   # True = questions cannot be forwarded or saved
@@ -302,8 +302,6 @@ def welcome_text():
         f"• የጥያቄዎች ብዛት፡ {total}\n"
         f"• የተሰጠ ሰዓት፡ {TIME_LIMIT_MINUTES} ደቂቃ\n"
         f"{once}"
-        f"• ለእያንዳንዱ ጥያቄ {PER_QUESTION_SECONDS // 60 if PER_QUESTION_SECONDS % 60 == 0 else PER_QUESTION_SECONDS} "
-        f"{'ደቂቃ' if PER_QUESTION_SECONDS % 60 == 0 else 'ሰከንድ'} ተሰጥቷል\n"
         "• ከፈተናው ወጥተው ተመልሰው /start ከጫኑ ፈተናው ይዘጋል\n"
         "• ጥያቄዎችን ፎቶ ማንሳት ወይም ማስተላለፍ አይፈቀድም\n\n"
         "ለመጀመር ከታች ያለውን ቁልፍ ይጫኑ። ከተጫኑ በኋላ ሰዓቱ ይጀምራል።"
