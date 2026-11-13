@@ -4,8 +4,8 @@
 <style>
 body{margin:0;font-family:system-ui,sans-serif;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#111);-webkit-user-select:none;user-select:none}
 #w{padding:16px;max-width:640px;margin:auto;position:relative;z-index:1}
-.b{display:block;width:100%;text-align:left;margin:8px 0;padding:14px;border:1px solid #8884;border-radius:10px;background:var(--tg-theme-secondary-bg-color,#f2f2f2);color:inherit;font-size:16px}
-.go{background:var(--tg-theme-button-color,#2481cc);color:var(--tg-theme-button-text-color,#fff);text-align:center}
+.b{display:flex;gap:8px;align-items:flex-start;width:100%;text-align:left;white-space:normal;overflow-wrap:anywhere;word-break:break-word;line-height:1.45;height:auto;margin:8px 0;padding:14px;border:1px solid #8884;border-radius:10px;background:var(--tg-theme-secondary-bg-color,#f2f2f2);color:inherit;font-size:16px}
+.go{justify-content:center;background:var(--tg-theme-button-color,#2481cc);color:var(--tg-theme-button-text-color,#fff);text-align:center}
 input{width:100%;box-sizing:border-box;padding:12px;font-size:16px;border-radius:10px;border:1px solid #8886}
 #wm{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:.07;font-size:18px;line-height:46px;overflow:hidden;transform:rotate(-20deg) scale(1.6);word-break:break-all}
 .t{display:flex;justify-content:space-between;opacity:.8;font-size:14px}
@@ -26,10 +26,10 @@ async function start(){const v=document.getElementById("i").value;const r=await 
  if(r.state!="run")return msg("ፈተናው ተዘግቷል ወይም አስቀድመው ወስደዋል።");
  Q=r.questions;L=r.letters;end=Date.now()+r.left*1000;run=true;
  document.getElementById("wm").textContent=(r.sid+" ").repeat(600);
- hb=setInterval(async()=>{const x=await post("ping",{});if(x.state=="closed")msg("ፈተናው ተጠናቀቀ።")},5000);show()}
+ hb=setInterval(async()=>{const x=await post("ping",{});if(x.state=="closed")msg("ፈተናው ተጠናቀቀ።")},10000);show()}
 function show(){if(k>=Q.length){post("finish",{reason:"done"});return msg("✅ ፈተናውን ጨርሰዋል።")}
- qend=Date.now()+QSEC*1000;const q=Q[k];W.innerHTML=`<div class=t><span>ጥያቄ ${k+1}/${Q.length}</span><span id=tm></span></div><h3>${q.q}</h3>`+
- q.o.map((o,c)=>`<button class=b onclick="ans(${c})">${L[c]}. ${o}</button>`).join("");tick()}
+ qend=Date.now()+QSEC*1000;const q=Q[k];W.innerHTML=`<div class=t><span>ጥያቄ ${k+1}/${Q.length}</span><span id=tm></span></div><h3 style="line-height:1.5;overflow-wrap:anywhere">${q.q}</h3>`+
+ q.o.map((o,c)=>`<button class=b onclick="ans(${c})"><span style="flex:none">${L[c]}.</span><span style="flex:1;min-width:0">${o}</span></button>`).join("");tick()}
 async function ans(c){if(!run)return;skips=0;const i=Q[k].i;k++;show();const r=await post("answer",{i,c});if(r.state=="closed")msg("ፈተናው ተጠናቀቀ።")}
 function tick(){const e=document.getElementById("tm");if(!e)return;const s=Math.max(0,Math.round((end-Date.now())/1000));const qs=Math.max(0,Math.ceil((qend-Date.now())/1000));if(qs<=0&&run&&s>0)return skip();e.textContent="ጥያቄ ⏱ "+qs+" | ጠቅላላ "+Math.floor(s/60)+":"+String(s%60).padStart(2,"0");if(s<=0&&run){msg("⏰ ሰዓቱ አልቋል")}}
 setInterval(tick,1000);
