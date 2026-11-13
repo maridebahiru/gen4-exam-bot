@@ -1,10 +1,12 @@
-"""Telegram Mini App exam: the exam page runs inside Telegram, so leaving/minimizing it is detected.
-Env: BOT_TOKEN, ADMIN_CHAT_ID, (Render sets RENDER_EXTERNAL_URL; or set WEBAPP_URL yourself, must be https)."""
-import asyncio, hashlib, hmac, json, logging, os, random, time
+"""Telegram Mini App exam, Render free + Firestore (Spark) storage.
+Env: BOT_TOKEN, ADMIN_CHAT_ID, ADMIN_KEY (for CSV export), FIREBASE_CREDENTIALS (service-account JSON, one line),
+     WEBAPP_URL or RENDER_EXTERNAL_URL (https)."""
+import asyncio, csv, hashlib, hmac, io, json, logging, os, random, time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl
 from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -13,25 +15,68 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 QUESTIONS_FILE = os.path.join(BASE, "questions.json")
 STATE_FILE = os.environ.get("STATE_FILE", os.path.join(BASE, "state.json"))
 TIME_LIMIT_MINUTES = 30
-LEFT_SECONDS = 20          # no sign of life from the page this long = student left
+LEFT_SECONDS = 40          # client pings every 10s; no ping this long = student left
+FLUSH_SECONDS = 3          # batch Firestore writes (keeps within Spark 20k writes/day)
 ALLOW_RETAKE = False
 ID_PREFIX = "EJAT-"
 LETTERS = ["ሀ", "ለ", "ሐ", "መ", "ሠ", "ረ"]
 TZ = timezone(timedelta(hours=3))
 TOKEN = os.environ.get("BOT_TOKEN", "")
 SECRET = hashlib.sha256(TOKEN.encode()).hexdigest()
+ADMIN = os.environ.get("ADMIN_CHAT_ID", "").strip()
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "").strip()
 QS = json.load(open(QUESTIONS_FILE, encoding="utf-8"))
 SESS = {}
-BOT = None
+DIRTY = set()
+DB = None
+BOT = APP = URL = None
+ADMINQ = STUQ = None
 now = time.time
 
-def save():
-    try:
-        json.dump(SESS, open(STATE_FILE + ".tmp", "w", encoding="utf-8"), ensure_ascii=False)
-        os.replace(STATE_FILE + ".tmp", STATE_FILE)
-    except Exception:
-        log.exception("save failed")
+# ---------- storage ----------
+def init_db():
+    global DB
+    info = os.environ.get("FIREBASE_CREDENTIALS", "").strip()
+    if not info:
+        log.warning("FIREBASE_CREDENTIALS not set: using local state.json only"); return
+    from google.cloud import firestore
+    DB = firestore.Client.from_service_account_info(json.loads(info))
 
+def load():
+    if DB:
+        for d in DB.collection("sessions").stream(): SESS[d.id] = d.to_dict()
+    else:
+        try: SESS.update(json.load(open(STATE_FILE, encoding="utf-8")))
+        except Exception: pass
+    t = int(now())
+    for s in SESS.values():
+        if s["status"] == "active": s["last_seen"] = t   # grace after restart
+    log.info("loaded %d sessions", len(SESS))
+
+def save(s): DIRTY.add(str(s["user_id"]))
+
+def flush(docs):
+    if not DB:
+        json.dump(docs, open(STATE_FILE + ".tmp", "w", encoding="utf-8"), ensure_ascii=False)
+        os.replace(STATE_FILE + ".tmp", STATE_FILE); return
+    items = list(docs.items())
+    for i in range(0, len(items), 400):
+        b = DB.batch()
+        for u, d in items[i:i + 400]: b.set(DB.collection("sessions").document(u), d)
+        b.commit()
+
+async def flusher():
+    while True:
+        await asyncio.sleep(FLUSH_SECONDS)
+        if not DIRTY: continue
+        ids = list(DIRTY); DIRTY.clear()
+        # file fallback needs everything; Firestore only the changed docs
+        docs = {u: json.loads(json.dumps(SESS[u])) for u in (SESS if not DB else ids) if u in SESS}
+        try: await asyncio.to_thread(flush, docs)
+        except Exception:
+            log.exception("flush failed"); DIRTY.update(ids)
+
+# ---------- logic ----------
 def order(sid):
     o = list(range(len(QS))); random.Random(sid).shuffle(o); return o
 
@@ -53,41 +98,61 @@ def report(s):
             lines.append(f"{i+1},{LETTERS[c]} {'✓' if ok else '✗'}")
     return score, "\n".join(lines)
 
-async def finish(s, reason):
-    if s["status"] != "active": return
-    s.update(status="finished", reason=reason, finished_at=int(now())); save()
+WHY = {"done": "✅ ፈተናውን ጨርሷል", "time": "⏰ ሰዓት አልቋል", "left": "⛔ ተማሪው ከፈተናው ወጥቷል (የተመለሱት ገብተዋል)"}
+
+def admin_text(s):
     score, lines = report(s)
-    why = {"done": "✅ ፈተናውን ጨርሷል", "time": "⏰ ሰዓት አልቋል", "left": "⛔ ተማሪው ከፈተናው ወጥቷል (የተመለሱት ገብተዋል)"}[reason]
     when = datetime.fromtimestamp(s["finished_at"], TZ).strftime("%Y-%m-%d %H:%M")
     used = (s["finished_at"] - s["start"]) // 60
     n = len(s["answers"]); total = len(QS)
-    text = (f"📝 አዲስ የፈተና ውጤት\n\n👤 {s['name']}\n🔗 {'@'+s['username'] if s['username'] else '-'}\n🆔 {s['user_id']}\n"
+    return (f"📝 አዲስ የፈተና ውጤት\n\n👤 {s['name']}\n🔗 {'@'+s['username'] if s['username'] else '-'}\n🆔 {s['user_id']}\n"
             f"🎓 ID: {s['student_id']}\n📊 ውጤት: {score}/{total} ({round(score*100/total)}%)\nየተመለሱ ጥያቄዎች: {n}/{total}\n"
-            f"⏱ {used} ደቂቃ\n{why}\n🕒 {when}\n\n{lines}")
-    log.info("RESULT %s %s %s/%s %s", s["student_id"], s["name"], score, total, reason)
-    admin = os.environ.get("ADMIN_CHAT_ID", "").strip()
-    try:
-        if admin: await BOT.send_message(int(admin), text)
-        await BOT.send_message(s["user_id"], "⏰ ሰዓቱ አልቋል፤ ፈተናው ተጠናቀቀ።" if reason == "time" else
-                               "⛔ ፈተናው ተዘግቷል፤ የመለሷቸው ጥያቄዎች ገብተዋል።" if reason == "left" else "✅ ፈተናውን ጨርሰዋል።")
-    except Exception:
-        log.exception("notify failed")
+            f"⏱ {used} ደቂቃ\n{WHY[s['reason']]}\n🕒 {when}\n\n{lines}")
+
+def finish(s, reason):
+    if s["status"] != "active": return
+    s.update(status="finished", reason=reason, finished_at=int(now()), notified=False); save(s)
+    score, _ = report(s)
+    log.info("RESULT %s %s %s/%s %s", s["student_id"], s["name"], score, len(QS), reason)
+    ADMINQ.put_nowait(str(s["user_id"]))
+    STUQ.put_nowait((s["user_id"], "⏰ ሰዓቱ አልቋል፤ ፈተናው ተጠናቀቀ።" if reason == "time" else
+                     "⛔ ፈተናው ተዘግቷል፤ የመለሷቸው ጥያቄዎች ገብተዋል።" if reason == "left" else "✅ ፈተናውን ጨርሰዋል።"))
+
+async def send(chat, text):
+    for _ in range(6):
+        try: await BOT.send_message(chat, text); return True
+        except RetryAfter as e: await asyncio.sleep(e.retry_after + 1)
+        except Exception: log.exception("send failed %s", chat); return False
+    return False
+
+async def admin_loop():
+    while True:
+        u = await ADMINQ.get(); s = SESS.get(u)
+        if s and not s.get("notified") and ADMIN:
+            if await send(int(ADMIN), admin_text(s)): s["notified"] = True; save(s)
+        await asyncio.sleep(1.1)       # ~1 msg/s per chat
+
+async def student_loop():
+    while True:
+        chat, text = await STUQ.get()
+        await send(chat, text); await asyncio.sleep(0.05)   # ~20/s global
 
 async def watcher():
     while True:
         await asyncio.sleep(5)
         for s in list(SESS.values()):
             if s["status"] == "active":
-                if now() >= s["deadline"]: await finish(s, "time")
-                elif now() - s["last_seen"] > LEFT_SECONDS: await finish(s, "left")
+                if now() >= s["deadline"]: finish(s, "time")
+                elif now() - s["last_seen"] > LEFT_SECONDS: finish(s, "left")
 
+# ---------- http ----------
 async def api(req):
     d = await req.json(); u = verify(d.get("initData"))
     if not u: return web.json_response({"state": "auth"})
     act, uid = req.match_info["act"], str(u["id"]); s = SESS.get(uid)
     if act == "start":
-        if s: 
-            await finish(s, "left")
+        if s:
+            finish(s, "left")
             if not ALLOW_RETAKE or s["status"] == "active": return web.json_response({"state": "closed"})
         sid_txt = " ".join(str(d.get("student_id", "")).split()).upper()
         if not (sid_txt.startswith(ID_PREFIX) and 8 <= len(sid_txt) <= 30): return web.json_response({"state": "badid"})
@@ -95,23 +160,34 @@ async def api(req):
         t = int(now()); sid = random.randint(10000, 99999)
         s = SESS[uid] = dict(user_id=u["id"], name=(u.get("first_name", "") + " " + u.get("last_name", "")).strip() or "?",
                              username=u.get("username", ""), student_id=sid_txt, sid=sid, start=t, deadline=t + TIME_LIMIT_MINUTES * 60,
-                             answers={}, status="active", reason=None, last_seen=t, finished_at=None); save()
+                             answers={}, status="active", reason=None, last_seen=t, finished_at=None, notified=False); save(s)
         qs = [{"i": i, "q": QS[i]["question"], "o": QS[i]["options"]} for i in order(sid)]
         return web.json_response({"state": "run", "left": s["deadline"] - t, "sid": sid_txt, "questions": qs, "letters": LETTERS})
     if not s or s["status"] != "active": return web.json_response({"state": "closed"})
     if now() >= s["deadline"]:
-        await finish(s, "time"); return web.json_response({"state": "closed"})
+        finish(s, "time"); return web.json_response({"state": "closed"})
     if act == "finish":
-        await finish(s, "left" if d.get("reason") == "left" else "done"); return web.json_response({"state": "closed"})
+        finish(s, "left" if d.get("reason") == "left" else "done"); return web.json_response({"state": "closed"})
     s["last_seen"] = now()
     i, c = d.get("i"), d.get("c")
     if isinstance(i, int) and isinstance(c, int) and 0 <= i < len(QS) and 0 <= c < len(QS[i]["options"]) and str(i) not in s["answers"]:
-        s["answers"][str(i)] = c; save()
+        s["answers"][str(i)] = c; save(s)
     return web.json_response({"state": "run", "left": int(s["deadline"] - now())})
 
 async def hook(req):
     if req.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET: return web.Response(status=403)
     await APP.process_update(Update.de_json(await req.json(), BOT)); return web.Response(text="ok")
+
+async def export(req):
+    if not ADMIN_KEY or not hmac.compare_digest(req.match_info["key"], ADMIN_KEY): return web.Response(status=403)
+    out = io.StringIO(); w = csv.writer(out)
+    w.writerow(["student_id", "name", "username", "telegram_id", "score", "total", "answered", "status", "reason", "minutes", "finished_at"])
+    for s in sorted(SESS.values(), key=lambda x: x["student_id"]):
+        score, _ = report(s); fin = s.get("finished_at")
+        w.writerow([s["student_id"], s["name"], s["username"], s["user_id"], score, len(QS), len(s["answers"]), s["status"], s["reason"] or "",
+                    (fin - s["start"]) // 60 if fin else "", datetime.fromtimestamp(fin, TZ).strftime("%Y-%m-%d %H:%M") if fin else ""])
+    return web.Response(body=("\ufeff" + out.getvalue()).encode("utf-8"), content_type="text/csv", charset="utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="results.csv"'})
 
 async def cmd_start(update: Update, ctx):
     s = SESS.get(str(update.effective_user.id))
@@ -125,23 +201,28 @@ async def cmd_start(update: Update, ctx):
         "• ጥያቄዎችን ፎቶ ማንሳት አይፈቀድም\n\nለመጀመር ከታች ያለውን ቁልፍ ይጫኑ።", reply_markup=kb)
 
 async def main():
-    global APP, BOT, URL
+    global APP, BOT, URL, ADMINQ, STUQ
     if not TOKEN: raise SystemExit("BOT_TOKEN is not set.")
     base = (os.environ.get("WEBAPP_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
     if not base.startswith("https://"): raise SystemExit("Set WEBAPP_URL (https) or run on Render.")
     URL = base + "/"
-    try: SESS.update(json.load(open(STATE_FILE, encoding="utf-8")))
-    except Exception: pass
+    ADMINQ, STUQ = asyncio.Queue(), asyncio.Queue()
+    init_db(); load()
     APP = Application.builder().token(TOKEN).build(); BOT = APP.bot
     APP.add_handler(CommandHandler(["start", "exam"], cmd_start))
     await APP.initialize(); await APP.start()
     await BOT.set_webhook(f"{base}/{SECRET}", secret_token=SECRET)
     w = web.Application()
     w.router.add_get("/", lambda r: web.FileResponse(os.path.join(BASE, "index.html")))
+    w.router.add_get("/health", lambda r: web.Response(text="ok"))
+    w.router.add_get("/export/{key}", export)
     w.router.add_post("/api/{act}", api); w.router.add_post(f"/{SECRET}", hook)
     r = web.AppRunner(w); await r.setup()
     await web.TCPSite(r, "0.0.0.0", int(os.environ.get("PORT", "10000"))).start()
-    asyncio.create_task(watcher()); log.info("running at %s", URL)
+    for s in SESS.values():                      # resend results not yet delivered before a restart
+        if s["status"] == "finished" and not s.get("notified"): ADMINQ.put_nowait(str(s["user_id"]))
+    for f in (watcher, flusher, admin_loop, student_loop): asyncio.create_task(f())
+    log.info("running at %s", URL)
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
