@@ -32,7 +32,7 @@ SESS = {}
 DIRTY = set()
 DB = None
 BOT = APP = URL = None
-ADMINQ = STUQ = None
+ADMINQ = STUQ = FLAGQ = None
 now = time.time
 
 # ---------- storage ----------
@@ -134,6 +134,11 @@ async def admin_loop():
             if await send(int(ADMIN), admin_text(s)): s["notified"] = True; save(s)
         await asyncio.sleep(1.1)       # ~1 msg/s per chat
 
+async def flag_loop():
+    while True:
+        text = await FLAGQ.get()
+        await send(int(ADMIN), text); await asyncio.sleep(1.1)
+
 async def student_loop():
     while True:
         chat, text = await STUQ.get()
@@ -177,6 +182,11 @@ async def api(req):
         finish(s, "time"); return web.json_response({"state": "closed"})
     if act == "finish":
         finish(s, "left" if d.get("reason") == "left" else "done"); return web.json_response({"state": "closed"})
+    if act == "flag":        # browser saw a screenshot/print key: count it and warn the admin (first 3 per student)
+        s["flags"] = s.get("flags", 0) + 1; s["last_seen"] = now(); save(s)
+        if s["flags"] <= 3 and ADMIN and FLAGQ is not None:
+            FLAGQ.put_nowait(f"📸 ማስጠንቀቂያ: የስክሪን ቀረጻ ሙከራ\n👤 {s['name']}\n🎓 {s['student_id']}\nጥያቄ {int(d.get('q') or 0)} · ሙከራ #{s['flags']} · {str(d.get('kind', ''))[:20]}")
+        return web.json_response({"state": "run", "left": int(s["deadline"] - now())})
     s["last_seen"] = now()
     i, c = d.get("i"), d.get("c")
     if isinstance(i, int) and isinstance(c, int) and 0 <= i < len(QS) and 0 <= c < len(QS[i]["options"]):
@@ -190,11 +200,11 @@ async def hook(req):
 async def export(req):
     if not ADMIN_KEY or not hmac.compare_digest(req.match_info["key"], ADMIN_KEY): return web.Response(status=403)
     out = io.StringIO(); w = csv.writer(out)
-    w.writerow(["student_id", "name", "username", "telegram_id", "score", "total", "answered", "status", "reason", "minutes", "finished_at"])
+    w.writerow(["student_id", "name", "username", "telegram_id", "score", "total", "answered", "status", "reason", "minutes", "finished_at", "screenshot_flags"])
     for s in sorted(SESS.values(), key=lambda x: x["student_id"]):
         score, _ = report(s); fin = s.get("finished_at")
         w.writerow([s["student_id"], s["name"], s["username"], s["user_id"], score, len(QS), len(s["answers"]), s["status"], s["reason"] or "",
-                    (fin - s["start"]) // 60 if fin else "", datetime.fromtimestamp(fin, TZ).strftime("%Y-%m-%d %H:%M") if fin else ""])
+                    (fin - s["start"]) // 60 if fin else "", datetime.fromtimestamp(fin, TZ).strftime("%Y-%m-%d %H:%M") if fin else "", s.get("flags", 0)])
     return web.Response(body=("\ufeff" + out.getvalue()).encode("utf-8"), content_type="text/csv", charset="utf-8",
                         headers={"Content-Disposition": 'attachment; filename="results.csv"'})
 
@@ -335,12 +345,12 @@ async def cmd_start(update: Update, ctx):
         "• ጥያቄዎችን ፎቶ ማንሳት አይፈቀድም\n\nለመጀመር ከታች ያለውን ቁልፍ ይጫኑ።", reply_markup=kb)
 
 async def main():
-    global APP, BOT, URL, ADMINQ, STUQ
+    global APP, BOT, URL, ADMINQ, STUQ, FLAGQ
     if not TOKEN: raise SystemExit("BOT_TOKEN is not set.")
     base = (os.environ.get("WEBAPP_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
     if not base.startswith("https://"): raise SystemExit("Set WEBAPP_URL (https) or run on Render.")
     URL = base + "/"
-    ADMINQ, STUQ = asyncio.Queue(), asyncio.Queue()
+    ADMINQ, STUQ, FLAGQ = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
     init_db(); load()
     APP = Application.builder().token(TOKEN).build(); BOT = APP.bot
     APP.add_handler(CommandHandler(["start", "exam"], cmd_start))
@@ -364,7 +374,7 @@ async def main():
     await web.TCPSite(r, "0.0.0.0", int(os.environ.get("PORT", "10000"))).start()
     for s in SESS.values():                      # resend results not yet delivered before a restart
         if s["status"] == "finished" and not s.get("notified"): ADMINQ.put_nowait(str(s["user_id"]))
-    for f in (watcher, flusher, admin_loop, student_loop): asyncio.create_task(f())
+    for f in (watcher, flusher, admin_loop, student_loop, flag_loop): asyncio.create_task(f())
     log.info("running at %s", URL)
     await asyncio.Event().wait()
 
