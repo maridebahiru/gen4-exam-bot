@@ -19,7 +19,6 @@ STATE_FILE = os.environ.get("STATE_FILE", os.path.join(BASE, "state.json"))
 TIME_LIMIT_MINUTES = 30
 LEFT_SECONDS = 40          # client pings every 10s; no ping this long = student left
 FLUSH_SECONDS = 3          # batch Firestore writes (keeps within Spark 20k writes/day)
-ALLOW_RETAKE = False
 ID_PREFIX = "EJAT-"
 LETTERS = ["ሀ", "ለ", "ሐ", "መ", "ሠ", "ረ"]
 TZ = timezone(timedelta(hours=3))
@@ -118,7 +117,7 @@ def finish(s, reason):
     log.info("RESULT %s %s %s/%s %s", s["student_id"], s["name"], score, len(QS), reason)
     ADMINQ.put_nowait(str(s["user_id"]))
     STUQ.put_nowait((s["user_id"], "⏰ ሰዓቱ አልቋል፤ ፈተናው ተጠናቀቀ።" if reason == "time" else
-                     "⛔ ፈተናው ተዘግቷል፤ የመለሷቸው ጥያቄዎች ገብተዋል።\nበስርዓት ወይም በኔትወርክ ችግር ከሆነ /start ተጭነው ጥያቄ ያቅርቡ።" if reason == "left" else "✅ ፈተናውን ጨርሰዋል።"))
+                     "⛔ ፈተናው ተዘግቷል፤ የመለሷቸው ጥያቄዎች ገብተዋል።\nበስርዓት ወይም በኔትወርክ ችግር ከሆነ አስተዳዳሪውን ያነጋግሩ።" if reason == "left" else "✅ ፈተናውን ጨርሰዋል።"))
 
 async def send(chat, text, markup=None):
     for _ in range(6):
@@ -168,8 +167,7 @@ async def api(req):
             return web.json_response({"state": "run", "left": int(s["deadline"] - t), "sid": s["student_id"],
                                       "questions": questions_for(s), "letters": LETTERS, "answers": s["answers"]})
         if s:
-            finish(s, "left")
-            if not ALLOW_RETAKE or s["status"] == "active": return web.json_response({"state": "closed"})
+            finish(s, "left"); return web.json_response({"state": "closed"})
         if not (sid_txt.startswith(ID_PREFIX) and 8 <= len(sid_txt) <= 30): return web.json_response({"state": "badid"})
         if any(x["student_id"] == sid_txt and x["user_id"] != u["id"] for x in SESS.values()): return web.json_response({"state": "takenid"})
         t = int(now()); sid = random.randint(10000, 99999)
@@ -181,6 +179,11 @@ async def api(req):
     if now() >= s["deadline"]:
         finish(s, "time"); return web.json_response({"state": "closed"})
     if act == "finish":
+        for k_, c_ in (d.get("answers") or {}).items():
+            try:
+                i_, c_ = int(k_), int(c_)
+                if 0 <= i_ < len(QS) and 0 <= c_ < len(QS[i_]["options"]): s["answers"][str(i_)] = c_
+            except (ValueError, TypeError): pass
         finish(s, "left" if d.get("reason") == "left" else "done"); return web.json_response({"state": "closed"})
     if act == "flag":        # browser saw a screenshot/print key: count it and warn the admin (first 3 per student)
         s["flags"] = s.get("flags", 0) + 1; s["last_seen"] = now(); save(s)
@@ -256,40 +259,18 @@ async def cmd_stats(update: Update, ctx):
     a = sum(x["status"] == "active" for x in SESS.values())
     await update.message.reply_text(f"👥 Total: {len(SESS)}\n▶️ Active: {a}\n✅ Finished: {len(SESS) - a}")
 
-def archive(s):
-    rec = dict(s, archived_at=int(now()))
-    if DB: DB.collection("archive").document(f"{s['user_id']}_{int(now())}").set(rec)
-    else:
-        with open(os.path.join(BASE, "archive.jsonl"), "a", encoding="utf-8") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
 def find_sid(txt):
     t = " ".join(str(txt).split()).upper()
     return next((x for x in SESS.values() if x["student_id"] == t), None)
-
-async def do_retake(s):
-    """archive old attempt, delete it. returns result text."""
-    score, _ = report(s)
-    await asyncio.to_thread(archive, s)
-    await do_reset([str(s["user_id"])])
-    STUQ.put_nowait((s["user_id"], "✅ ፈተናውን እንደገና እንዲወስዱ ተፈቅዶልዎታል። /start ይጫኑ።"))
-    return f"✅ {s['name']} ({s['student_id']}) can retake.\nOld result {score}/{len(QS)} saved in archive."
 
 def do_reopen(s, mins=None):
     rem = max(int(s["deadline"] - (s.get("finished_at") or now())), 0)
     secs = mins * 60 if mins else max(rem, 300)
     t = now()
-    s.update(status="active", reason=None, finished_at=None, notified=False, resume=True, resume_secs=secs, req=False,
+    s.update(status="active", reason=None, finished_at=None, notified=False, resume=True, resume_secs=secs,
              last_seen=t + 900, deadline=t + secs + 900); save(s)
     STUQ.put_nowait((s["user_id"], "✅ ፈተናዎ እንደገና ተከፍቷል፤ የመለሷቸው ተቀምጠዋል። /start ይጫኑና መለያ ቁጥርዎን ያስገቡ።"))
     return f"✅ {s['name']} ({s['student_id']}) reopened: {secs // 60} min, {len(s['answers'])} answers kept."
-
-async def cmd_retake(update: Update, ctx):
-    """/retake EJAT-001 : admin does it directly."""
-    if not is_admin(update): return
-    s = find_sid(" ".join(ctx.args))
-    if not s: await update.message.reply_text("ተማሪው አልተገኘም።\n/retake EJAT-001"); return
-    try: await update.message.reply_text(await do_retake(s))
-    except Exception: log.exception("retake failed"); await update.message.reply_text("❌ archive failed, nothing deleted.")
 
 async def cmd_reopen(update: Update, ctx):
     """/reopen EJAT-001 [minutes] : admin does it directly."""
@@ -300,47 +281,15 @@ async def cmd_reopen(update: Update, ctx):
     if not s: await update.message.reply_text("ተማሪው አልተገኘም።\n/reopen EJAT-001 10"); return
     await update.message.reply_text(do_reopen(s, mins))
 
-async def cb_student(update: Update, ctx):
-    """Student taps 'ask to retake': nothing changes until the admin approves."""
-    q = update.callback_query; u = str(q.from_user.id); s = SESS.get(u)
-    if not s or s["status"] == "active": await q.answer("ምንም ጥያቄ አያስፈልግም።", show_alert=True); return
-    if s.get("req"): await q.answer("ጥያቄዎ ቀድሞ ተልኳል፤ ምላሽ ይጠብቁ።", show_alert=True); return
-    if not ADMIN: await q.answer("አስተዳዳሪ አልተዘጋጀም።", show_alert=True); return
-    s["req"] = True; save(s)
-    score, _ = report(s); used = ((s.get("finished_at") or int(now())) - s["start"]) // 60
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ ቀጥል (መልሶች ይቆያሉ)", callback_data=f"ok:reopen:{u}"),
-                                InlineKeyboardButton("🔁 እንደገና ጀምር", callback_data=f"ok:retake:{u}")],
-                               [InlineKeyboardButton("❌ አትፍቀድ", callback_data=f"ok:no:{u}")]])
-    await send(int(ADMIN), f"🙋 የድጋሚ ፈተና ጥያቄ\n\n👤 {s['name']}\n🎓 {s['student_id']}\n📊 {score}/{len(QS)} · መልሶች {len(s['answers'])}/{len(QS)} · {used} ደቂቃ\n"
-                          f"ምክንያት: {WHY.get(s['reason'], s['reason'])}\n\nእርስዎ እስካልፈቀዱ ምንም አይቀየርም።", kb)
-    await q.answer("ጥያቄዎ ለአስተዳዳሪው ተልኳል።", show_alert=True)
-
-async def cb_admin(update: Update, ctx):
-    q = update.callback_query
-    if not ADMIN or str(q.from_user.id) != ADMIN: await q.answer("አይፈቀድም።", show_alert=True); return
-    _, act, u = q.data.split(":", 2); s = SESS.get(u)
-    if not s or not s.get("req"): await q.answer("ይህ ጥያቄ ቀድሞ ተስተናግዷል።", show_alert=True); return
-    try:
-        if act == "reopen": res = do_reopen(s)
-        elif act == "retake": res = await do_retake(s)
-        else:
-            s["req"] = False; save(s); res = f"❌ Rejected: {s['name']} ({s['student_id']})"
-            STUQ.put_nowait((s["user_id"], "ጥያቄዎ አልተፈቀደም።"))
-    except Exception:
-        log.exception("approval action failed"); await q.answer("❌ አልተሳካም (log ይመልከቱ)", show_alert=True); return
-    await q.answer("ተከናውኗል።")
-    try: await q.edit_message_text(q.message.text + "\n\n" + res)
-    except Exception: pass
-
 async def cmd_start(update: Update, ctx):
     s = SESS.get(str(update.effective_user.id))
-    if s and s["status"] != "active" and not ALLOW_RETAKE:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🙋 በችግር ተቋርጦ ከሆነ ለአስተዳዳሪ ጠይቅ", callback_data="req")]])
-        await update.message.reply_text("ፈተናውን አስቀድመው ጨርሰዋል፤ ደግመው መውሰድ አይችሉም።\n\nበስርዓት ወይም በኔትወርክ ችግር ከተቋረጠ ጥያቄ ያቅርቡ፤ አስተዳዳሪው ከፈቀደ ብቻ ይከፈታል።", reply_markup=kb); return
+    if s and s["status"] != "active":
+        await update.message.reply_text("ፈተናውን አስቀድመው ጨርሰዋል፤ ደግመው መውሰድ አይችሉም።\n\nበስርዓት ወይም በኔትወርክ ችግር ከተቋረጠ አስተዳዳሪውን ያነጋግሩ።"); return
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 ፈተና ጀምር", web_app=WebAppInfo(url=URL))]])
     await update.message.reply_text(
         "እንኳን ደህና መጡ! 👋\n\nይህ የ4ኛ ትውልድ ሱባኤ-ጉባኤ የፈተና ቦት ነው።\n\n📌 ደንቦች\n"
         f"• የጥያቄዎች ብዛት፡ {len(QS)}\n• የተሰጠ ሰዓት፡ {TIME_LIMIT_MINUTES} ደቂቃ\n• ፈተናውን አንድ ጊዜ ብቻ መውሰድ ይችላሉ\n"
+        "• ከማስረከብዎ በፊት ወደ ማንኛውም ጥያቄ ተመልሰው መልስዎን መቀየር ይችላሉ\n"
         "• ፈተናው ላይ ሳሉ ወደ ሌላ መተግበሪያ ከወጡ ወይም ቴሌግራምን ካሳነሱ ፈተናው ይዘጋል፤ የመለሷቸው ብቻ ይቆጠራሉ\n"
         "• ጥያቄዎችን ፎቶ ማንሳት አይፈቀድም\n\nለመጀመር ከታች ያለውን ቁልፍ ይጫኑ።", reply_markup=kb)
 
@@ -357,10 +306,7 @@ async def main():
     APP.add_handler(CommandHandler("reset", cmd_reset))
     APP.add_handler(CommandHandler("resetall", cmd_resetall))
     APP.add_handler(CommandHandler("stats", cmd_stats))
-    APP.add_handler(CommandHandler("retake", cmd_retake))
     APP.add_handler(CommandHandler("reopen", cmd_reopen))
-    APP.add_handler(CallbackQueryHandler(cb_student, pattern="^req$"))
-    APP.add_handler(CallbackQueryHandler(cb_admin, pattern="^ok:"))
     await APP.initialize(); await APP.start()
     await BOT.set_webhook(f"{base}/{SECRET}", secret_token=SECRET)
     w = web.Application()
