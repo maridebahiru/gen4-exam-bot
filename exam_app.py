@@ -10,6 +10,8 @@ from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)   # httpx INFO logs print the bot token
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("exam")
 BASE = os.path.dirname(os.path.abspath(__file__))
 QUESTIONS_FILE = os.path.join(BASE, "questions.json")
