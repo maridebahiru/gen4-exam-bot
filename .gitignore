@@ -4,3 +4,7 @@ __pycache__/
 venv/
 state.json
 state.json.tmp
+# Firebase service-account keys: never commit
+*service-account*.json
+*firebase-adminsdk*.json
+serviceAccount*.json
